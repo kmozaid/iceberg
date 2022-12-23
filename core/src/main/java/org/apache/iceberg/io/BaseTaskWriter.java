@@ -49,6 +49,7 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
   private final PartitionSpec spec;
   private final FileFormat format;
   private final FileAppenderFactory<T> appenderFactory;
+  private final FileAppenderFactory<T> deleteFileAppenderFactory;
   private final OutputFileFactory fileFactory;
   private final FileIO io;
   private final long targetFileSize;
@@ -61,9 +62,21 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
       OutputFileFactory fileFactory,
       FileIO io,
       long targetFileSize) {
+    this(spec, format, appenderFactory, null, fileFactory, io, targetFileSize);
+  }
+
+  protected BaseTaskWriter(
+      PartitionSpec spec,
+      FileFormat format,
+      FileAppenderFactory<T> appenderFactory,
+      FileAppenderFactory<T> deleteFileAppenderFactory,
+      OutputFileFactory fileFactory,
+      FileIO io,
+      long targetFileSize) {
     this.spec = spec;
     this.format = format;
     this.appenderFactory = appenderFactory;
+    this.deleteFileAppenderFactory = deleteFileAppenderFactory;
     this.fileFactory = fileFactory;
     this.io = io;
     this.targetFileSize = targetFileSize;
@@ -113,14 +126,26 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
     private Map<StructLike, PathOffset> insertedRowMap;
 
     protected BaseEqualityDeltaWriter(StructLike partition, Schema schema, Schema deleteSchema) {
+      this(partition, schema, deleteSchema, false);
+    }
+
+    protected BaseEqualityDeltaWriter(
+        StructLike partition, Schema schema, Schema deleteSchema, boolean requireGlobalDeletes) {
       Preconditions.checkNotNull(schema, "Iceberg table schema cannot be null.");
       Preconditions.checkNotNull(deleteSchema, "Equality-delete schema cannot be null.");
       this.structProjection = StructProjection.create(schema, deleteSchema);
-
       this.dataWriter = new RollingFileWriter(partition);
-      this.eqDeleteWriter = new RollingEqDeleteWriter(partition);
+
+      StructLike partitionKeyForDeleteFile = requireGlobalDeletes ? null : partition;
+
+      this.eqDeleteWriter = new RollingEqDeleteWriter(partitionKeyForDeleteFile);
       this.posDeleteWriter =
-          new SortedPosDeleteWriter<>(appenderFactory, fileFactory, format, partition);
+          new SortedPosDeleteWriter<>(
+              deleteFileAppenderFactory != null ? deleteFileAppenderFactory : appenderFactory,
+              fileFactory,
+              format,
+              partitionKeyForDeleteFile);
+
       this.insertedRowMap = StructLikeMap.create(deleteSchema.asStruct());
     }
 
@@ -369,12 +394,17 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
   }
 
   protected class RollingEqDeleteWriter extends BaseRollingWriter<EqualityDeleteWriter<T>> {
+
     RollingEqDeleteWriter(StructLike partitionKey) {
       super(partitionKey);
     }
 
     @Override
     EqualityDeleteWriter<T> newWriter(EncryptedOutputFile file, StructLike partitionKey) {
+      if (deleteFileAppenderFactory != null) {
+        return deleteFileAppenderFactory.newEqDeleteWriter(file, format, partitionKey);
+      }
+
       return appenderFactory.newEqDeleteWriter(file, format, partitionKey);
     }
 
